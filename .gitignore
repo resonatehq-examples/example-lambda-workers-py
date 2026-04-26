@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info/
+
+# Virtual environments
+.venv/
+
+# Lambda packaging
+lambda-package/
+lambda-package.zip
+
+# Environment
+.env
+.env.local
+
+# OS
+.DS_Store

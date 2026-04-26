@@ -1,0 +1,10 @@
+[project]
+name = "example-lambda-workers-py"
+version = "0.1.0"
+description = "AWS Lambda as a stateless trigger for durable Python workflows on a long-running Resonate worker."
+readme = "README.md"
+requires-python = ">=3.13"
+license = { text = "Apache-2.0" }
+dependencies = [
+    "resonate-sdk>=0.6.3",
+]
