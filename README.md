@@ -77,7 +77,7 @@ pyproject.toml       # resonate-sdk>=0.6.3
 
 - Python 3.13
 - [`uv`](https://docs.astral.sh/uv/) for environment + dependency management
-- A running [Resonate Server](https://docs.resonatehq.io/server/install) (legacy server: `resonate serve`)
+- A running [Resonate Server](https://docs.resonatehq.io/deploy/run-server) (legacy server: `resonate serve`)
 
 > **Server compatibility note.** The Python SDK currently targets the legacy Resonate Server (`resonate serve`). It is **not** compatible with `resonate dev` (server v0.9.x) at this time.
 
