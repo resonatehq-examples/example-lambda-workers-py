@@ -10,35 +10,33 @@
 # How it works:
 #   1. The worker connects to the Resonate Server in the "worker" group
 #   2. It registers `process_document` as a durable function
-#   3. When Lambda calls `resonate.begin_rpc("doc/...", "process_document", ...)`
+#   3. When Lambda calls `resonate.rpc("doc/...", "process_document", ...)`
 #      against the same Resonate Server, the Server hands the work to this
 #      process via the worker group's poll endpoint.
-#   4. Each yielded step is checkpointed in the Resonate Server, so a crash
+#   4. Each awaited step is checkpointed in the Resonate Server, so a crash
 #      (or Lambda timeout, or even a worker restart) only re-runs the failed
 #      step, not the whole workflow.
 #
-# Run it: `python worker.py` (after `resonate serve` is up).
+# Run it: `python worker.py` (after `resonate dev` is up on port 8001).
 
 from __future__ import annotations
 
+import asyncio
+import os
 import time
-from threading import Event
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from resonate import Context, Resonate
+from resonate.resonate import Resonate
 
-# ---------------------------------------------------------------------------
-# Worker-side Resonate client — joins the "worker" group
-# ---------------------------------------------------------------------------
-
-resonate = Resonate.remote(group="worker")
+if TYPE_CHECKING:
+    from resonate.context import Context
 
 
 # ---------------------------------------------------------------------------
 # Workflow steps — each is checkpointed by Resonate on completion.
 # ---------------------------------------------------------------------------
 
-def download_document(_ctx: Context, job: dict[str, Any]) -> int:
+async def download_document(_ctx: Context, job: dict[str, Any]) -> int:
     print(f"[download]   job {job['jobId']} — fetching {job['type']} from {job['documentUrl']}")
     time.sleep(0.5)  # simulates download
     page_count = (hash(job["jobId"]) % 20) + 1
@@ -46,7 +44,7 @@ def download_document(_ctx: Context, job: dict[str, Any]) -> int:
     return page_count
 
 
-def extract_text(_ctx: Context, job: dict[str, Any], page_count: int) -> str:
+async def extract_text(_ctx: Context, job: dict[str, Any], page_count: int) -> str:
     print(f"[extract]    job {job['jobId']} — extracting text from {page_count} pages (OCR)")
     time.sleep(page_count * 0.05)  # 50ms per page in demo
     text = f"[extracted text from {page_count}-page {job['type']} document]"
@@ -54,7 +52,7 @@ def extract_text(_ctx: Context, job: dict[str, Any], page_count: int) -> str:
     return text
 
 
-def analyze_document(_ctx: Context, job: dict[str, Any], text: str) -> dict[str, Any]:
+async def analyze_document(_ctx: Context, job: dict[str, Any], text: str) -> dict[str, Any]:
     print(f"[analyze]    job {job['jobId']} — sending to LLM for {job['type']} analysis")
     time.sleep(0.8)  # simulates LLM call
     summary = f"{job['type']} document processed. {len(text)} chars analyzed."
@@ -68,7 +66,7 @@ def analyze_document(_ctx: Context, job: dict[str, Any], text: str) -> dict[str,
     return {"summary": summary, "data": data}
 
 
-def store_results(_ctx: Context, job: dict[str, Any], summary: str, data: dict[str, Any]) -> str:
+async def store_results(_ctx: Context, job: dict[str, Any], summary: str, data: dict[str, Any]) -> str:
     print(f"[store]      job {job['jobId']} — writing results to database")
     time.sleep(0.2)
     stored_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -76,7 +74,7 @@ def store_results(_ctx: Context, job: dict[str, Any], summary: str, data: dict[s
     return stored_at
 
 
-def notify_requester(_ctx: Context, job: dict[str, Any], stored_at: str) -> str:
+async def notify_requester(_ctx: Context, job: dict[str, Any], stored_at: str) -> str:
     print(f"[notify]     job {job['jobId']} — notifying {job['requesterId']} that results are ready")
     time.sleep(0.15)
     notified_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -88,20 +86,19 @@ def notify_requester(_ctx: Context, job: dict[str, Any], stored_at: str) -> str:
 # The durable workflow — registered with Resonate, dispatched from Lambda
 # ---------------------------------------------------------------------------
 
-@resonate.register
-def process_document(ctx: Context, job: dict[str, Any]):
+async def process_document(ctx: Context, job: dict[str, Any]) -> dict[str, Any]:
     """Five-step durable document pipeline.
 
-    Each `yield ctx.run(...)` is checkpointed: if the worker crashes,
+    Each `await ctx.run(...)` is checkpointed: if the worker crashes,
     only the unfinished step re-runs on resume.
     """
-    page_count = yield ctx.run(download_document, job)
-    text = yield ctx.run(extract_text, job, page_count)
-    analysis = yield ctx.run(analyze_document, job, text)
-    stored_at = yield ctx.run(
+    page_count = await ctx.run(download_document, job)
+    text = await ctx.run(extract_text, job, page_count)
+    analysis = await ctx.run(analyze_document, job, text)
+    stored_at = await ctx.run(
         store_results, job, analysis["summary"], analysis["data"]
     )
-    notified_at = yield ctx.run(notify_requester, job, stored_at)
+    notified_at = await ctx.run(notify_requester, job, stored_at)
 
     return {
         "jobId": job["jobId"],
@@ -114,8 +111,23 @@ def process_document(ctx: Context, job: dict[str, Any]):
     }
 
 
-if __name__ == "__main__":
+# ---------------------------------------------------------------------------
+# Entry point — connect to Resonate Server, register workflow, block forever
+# ---------------------------------------------------------------------------
+
+async def main() -> None:
+    url = os.environ.get("RESONATE_URL", "http://localhost:8001")
+    worker = Resonate(url=url, group="worker")
+    worker.register(process_document)
+
     print("[worker]     starting — registered: process_document")
     print("[worker]     waiting for work from the Resonate Server...")
-    resonate.start()
-    Event().wait()
+
+    try:
+        await asyncio.Event().wait()  # block until SIGINT/SIGTERM
+    finally:
+        await worker.stop()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
