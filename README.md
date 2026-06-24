@@ -16,7 +16,9 @@ AWS Lambda as a stateless trigger for durable Python workflows. Lambda accepts t
 API Gateway --> POST /process-document --> Lambda (returns 202 immediately)
                                               |
                                               v
-                                resonate.begin_rpc("doc/job_123", "process_document", job)
+                                resonate.options(target="worker").rpc(
+                                    "doc/job_123", "process_document", job
+                                )
                                               |
                                               v
                                     Resonate Server (durable state)
@@ -29,7 +31,7 @@ API Gateway --> POST /process-document --> Lambda (returns 202 immediately)
                                   |- store_results      (checkpointed)
                                   |- notify_requester   (checkpointed)
 
-GET /status/:jobId --> Lambda polls resonate.get("doc/job_123")
+GET /status/:jobId --> Lambda polls await resonate.get("doc/job_123")
 ```
 
 ## Why Lambda alone isn't enough
@@ -46,40 +48,48 @@ GET /status/:jobId --> Lambda polls resonate.get("doc/job_123")
 
 ```python
 # lambda_function.py
-from resonate import Resonate
+import asyncio, json, os
+from resonate.resonate import Resonate
 
-resonate = Resonate.remote(group="gateway", host=os.environ.get("RESONATE_HOST"))
+RESONATE_URL = os.environ.get("RESONATE_URL", "http://localhost:8001")
 
-def lambda_handler(event, _context=None):
-    job = json.loads(event["body"])
-
-    # Non-blocking: hands work to the worker group, then returns.
-    resonate.options(target="poll://any@worker").begin_rpc(
+async def _dispatch_async(job: dict) -> None:
+    # Resonate must be constructed inside a running event loop — its __init__
+    # spawns asyncio tasks, so a module-level instance raises RuntimeError on
+    # Lambda cold start (no loop yet).
+    r = Resonate(url=RESONATE_URL, group="gateway")
+    r.options(target="worker").rpc(
         f"doc/{job['jobId']}",
         "process_document",
         job,
     )
+    await r.stop()
+
+def lambda_handler(event, _context=None):
+    job = json.loads(event["body"])
+
+    # asyncio.run() spins up an event loop for this invocation, constructs
+    # Resonate inside it, fires the RPC, then tears down cleanly.
+    asyncio.run(_dispatch_async(job))
 
     return {"statusCode": 202, "body": json.dumps({"status": "accepted"})}
 ```
 
-**The role split:** Lambda is a stateless trigger. Its only job is to call `resonate.begin_rpc(...)` — same shape as invoking any async function — and return 202. The durable workflow runs on a separate long-running Python process (`worker.py`), which has no 15-minute ceiling. No CDK stack to coordinate Lambda-as-executor, no IAM glue between your Lambda and the workflow steps, no service registration per step — Lambda triggers, the worker runs.
+**The role split:** Lambda is a stateless trigger. Its only job is to call `resonate.rpc(...)` — same shape as invoking any async function — and return 202. The durable workflow runs on a separate long-running Python process (`worker.py`), which has no 15-minute ceiling. No CDK stack to coordinate Lambda-as-executor, no IAM glue between your Lambda and the workflow steps, no service registration per step — Lambda triggers, the worker runs.
 
 ## Files
 
 ```
 lambda_function.py   # Lambda handler — POST /process-document, GET /status/:jobId
 worker.py            # Long-running Resonate worker — the durable workflow
-pyproject.toml       # resonate-sdk>=0.6.3
+pyproject.toml       # resonate-sdk>=0.7.0
 ```
 
 ## Prerequisites
 
 - Python 3.13
 - [`uv`](https://docs.astral.sh/uv/) for environment + dependency management
-- A running [Resonate Server](https://docs.resonatehq.io/deploy/run-server) (legacy server: `resonate serve`)
-
-> **Server compatibility note.** The Python SDK currently targets the legacy Resonate Server (`resonate serve`). It is **not** compatible with `resonate dev` (server v0.9.x) at this time.
+- A running [Resonate Server](https://docs.resonatehq.io/deploy/run-server) (`resonate dev`)
 
 ## Run it locally
 
@@ -91,11 +101,13 @@ You can exercise the full pattern on one machine — no AWS account required.
 uv sync
 ```
 
-### 2. Start the Resonate Server (legacy)
+### 2. Start the Resonate Server
 
 ```bash
-resonate serve --aio-store-sqlite-path :memory:
+resonate dev
 ```
+
+The server listens on port 8001 by default.
 
 ### 3. Start the Resonate worker
 
@@ -144,10 +156,10 @@ The Resonate Server and the worker are long-running processes. Lambda is the onl
 
 ```bash
 # On your server host
-resonate serve --aio-store-sqlite-path /var/lib/resonate/state.db
+resonate dev
 
 # On your worker host (can be the same machine)
-RESONATE_HOST=http://<your-server> uv run python worker.py
+RESONATE_URL=http://<your-server>:8001 uv run python worker.py
 ```
 
 ### 2. Package the Lambda function
@@ -158,12 +170,12 @@ Because `resonate-sdk` is a third-party dependency, you need to ship it with the
 
 ```bash
 mkdir -p lambda-package
-uv pip install --target lambda-package resonate-sdk>=0.6.3
+uv pip install --target lambda-package resonate-sdk>=0.7.0
 cp lambda_function.py lambda-package/
 cd lambda-package && zip -r ../lambda-package.zip . && cd ..
 ```
 
-**Option B — Lambda layer:** publish `resonate-sdk>=0.6.3` as a layer and attach it to the function. The handler zip then contains only `lambda_function.py`.
+**Option B — Lambda layer:** publish `resonate-sdk>=0.7.0` as a layer and attach it to the function. The handler zip then contains only `lambda_function.py`.
 
 ### 3. Create the Lambda function
 
@@ -174,7 +186,7 @@ aws lambda create-function \
   --handler lambda_function.lambda_handler \
   --zip-file fileb://lambda-package.zip \
   --role arn:aws:iam::<account>:role/<lambda-role> \
-  --environment "Variables={RESONATE_HOST=http://<your-server>,RESONATE_STORE_PORT=8001,RESONATE_MESSAGE_SOURCE_PORT=8002}"
+  --environment "Variables={RESONATE_URL=http://<your-server>:8001}"
 ```
 
 Wire up an API Gateway HTTP API in front of it and route:

@@ -20,34 +20,24 @@
 #   Lambda can't hold state between timeouts. Resonate can.
 #
 # The role split:
-#   Lambda is a thin trigger — its only job is to call `resonate.begin_rpc(...)`
+#   Lambda is a thin trigger — its only job is to call `resonate.rpc(...)`
 #   and return 202. The Resonate Server holds the durable promise. The worker
 #   process (worker.py) executes each step and checkpoints progress.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any
 
-from resonate import Resonate
+from resonate.resonate import Resonate
 
 # ---------------------------------------------------------------------------
-# Lambda-side Resonate client — created once per container cold start
+# Configuration
 # ---------------------------------------------------------------------------
-# Module-level: keeps the Resonate connection warm across invocations within
-# the same Lambda container. Configured to talk to a remote Resonate Server.
 
-RESONATE_HOST = os.environ.get("RESONATE_HOST")  # e.g. http://your-server
-RESONATE_STORE_PORT = os.environ.get("RESONATE_STORE_PORT", "8001")
-RESONATE_MSG_PORT = os.environ.get("RESONATE_MESSAGE_SOURCE_PORT", "8002")
-
-resonate = Resonate.remote(
-    group="gateway",
-    host=RESONATE_HOST,
-    store_port=RESONATE_STORE_PORT,
-    message_source_port=RESONATE_MSG_PORT,
-)
+RESONATE_URL = os.environ.get("RESONATE_URL", "http://localhost:8001")
 
 JSON_HEADERS = {"Content-Type": "application/json"}
 
@@ -63,6 +53,16 @@ def _response(status_code: int, payload: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # POST /process-document — dispatch a durable document processing job
 # ---------------------------------------------------------------------------
+
+async def _dispatch_async(job: dict[str, Any]) -> None:
+    r = Resonate(url=RESONATE_URL, group="gateway")
+    r.options(target="worker").rpc(
+        f"doc/{job['jobId']}",
+        "process_document",
+        job,
+    )
+    await r.stop()
+
 
 def _handle_process_document(event: dict[str, Any]) -> dict[str, Any]:
     body_raw = event.get("body") or "{}"
@@ -94,11 +94,7 @@ def _handle_process_document(event: dict[str, Any]) -> dict[str, Any]:
     # Non-blocking: hands the work to the Resonate Server. The worker picks
     # it up via the worker group's poll endpoint. Lambda exits without
     # waiting for the workflow to finish.
-    resonate.options(target="poll://any@worker").begin_rpc(
-        f"doc/{job_id}",
-        "process_document",
-        job,
-    )
+    asyncio.run(_dispatch_async(job))
 
     return _response(
         202,
@@ -115,6 +111,18 @@ def _handle_process_document(event: dict[str, Any]) -> dict[str, Any]:
 # GET /status/:jobId — poll for workflow result
 # ---------------------------------------------------------------------------
 
+async def _status_async(job_id: str) -> dict[str, Any]:
+    r = Resonate(url=RESONATE_URL, group="gateway")
+    handle = await r.get(f"doc/{job_id}")
+    if not handle.done():
+        await r.stop()
+        return _response(200, {"status": "processing", "jobId": job_id})
+
+    result = await handle.result()
+    await r.stop()
+    return _response(200, {"status": "done", "jobId": job_id, "result": result})
+
+
 def _handle_status(event: dict[str, Any]) -> dict[str, Any]:
     path_params = event.get("pathParameters") or {}
     job_id = path_params.get("jobId")
@@ -123,12 +131,7 @@ def _handle_status(event: dict[str, Any]) -> dict[str, Any]:
         return _response(400, {"error": "jobId is required"})
 
     try:
-        handle = resonate.get(f"doc/{job_id}")
-        if not handle.done():
-            return _response(200, {"status": "processing", "jobId": job_id})
-
-        result = handle.result()
-        return _response(200, {"status": "done", "jobId": job_id, "result": result})
+        return asyncio.run(_status_async(job_id))
     except Exception as err:  # promise not found, etc.
         print(f"[lambda]     status lookup failed for {job_id}: {err}")
         return _response(404, {"status": "not_found", "jobId": job_id})
