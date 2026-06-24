@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 async def download_document(_ctx: Context, job: dict[str, Any]) -> int:
     print(f"[download]   job {job['jobId']} — fetching {job['type']} from {job['documentUrl']}")
-    time.sleep(0.5)  # simulates download
+    await asyncio.sleep(0.5)  # simulates download
     page_count = (hash(job["jobId"]) % 20) + 1
     print(f"[download]   job {job['jobId']} — {page_count} pages received")
     return page_count
@@ -46,7 +46,7 @@ async def download_document(_ctx: Context, job: dict[str, Any]) -> int:
 
 async def extract_text(_ctx: Context, job: dict[str, Any], page_count: int) -> str:
     print(f"[extract]    job {job['jobId']} — extracting text from {page_count} pages (OCR)")
-    time.sleep(page_count * 0.05)  # 50ms per page in demo
+    await asyncio.sleep(page_count * 0.05)  # 50ms per page in demo
     text = f"[extracted text from {page_count}-page {job['type']} document]"
     print(f"[extract]    job {job['jobId']} — extraction complete")
     return text
@@ -54,7 +54,7 @@ async def extract_text(_ctx: Context, job: dict[str, Any], page_count: int) -> s
 
 async def analyze_document(_ctx: Context, job: dict[str, Any], text: str) -> dict[str, Any]:
     print(f"[analyze]    job {job['jobId']} — sending to LLM for {job['type']} analysis")
-    time.sleep(0.8)  # simulates LLM call
+    await asyncio.sleep(0.8)  # simulates LLM call
     summary = f"{job['type']} document processed. {len(text)} chars analyzed."
     if job["type"] == "invoice":
         data: dict[str, Any] = {"vendor": "Acme Corp", "amount": 4999, "currency": "USD"}
@@ -68,7 +68,7 @@ async def analyze_document(_ctx: Context, job: dict[str, Any], text: str) -> dic
 
 async def store_results(_ctx: Context, job: dict[str, Any], summary: str, data: dict[str, Any]) -> str:
     print(f"[store]      job {job['jobId']} — writing results to database")
-    time.sleep(0.2)
+    await asyncio.sleep(0.2)
     stored_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     print(f"[store]      job {job['jobId']} — stored at {stored_at}")
     return stored_at
@@ -76,7 +76,7 @@ async def store_results(_ctx: Context, job: dict[str, Any], summary: str, data: 
 
 async def notify_requester(_ctx: Context, job: dict[str, Any], stored_at: str) -> str:
     print(f"[notify]     job {job['jobId']} — notifying {job['requesterId']} that results are ready")
-    time.sleep(0.15)
+    await asyncio.sleep(0.15)
     notified_at = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     print(f"[notify]     job {job['jobId']} — requester notified")
     return notified_at

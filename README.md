@@ -48,20 +48,29 @@ GET /status/:jobId --> Lambda polls await resonate.get("doc/job_123")
 
 ```python
 # lambda_function.py
-import asyncio, os
-from resonate import Resonate
+import asyncio, json, os
+from resonate.resonate import Resonate
 
-resonate = Resonate(url=os.environ.get("RESONATE_URL", "http://localhost:8001"), group="gateway")
+RESONATE_URL = os.environ.get("RESONATE_URL", "http://localhost:8001")
 
-def lambda_handler(event, _context=None):
-    job = json.loads(event["body"])
-
-    # Non-blocking: hands work to the worker group, then returns.
-    resonate.options(target="worker").rpc(
+async def _dispatch_async(job: dict) -> None:
+    # Resonate must be constructed inside a running event loop — its __init__
+    # spawns asyncio tasks, so a module-level instance raises RuntimeError on
+    # Lambda cold start (no loop yet).
+    r = Resonate(url=RESONATE_URL, group="gateway")
+    r.options(target="worker").rpc(
         f"doc/{job['jobId']}",
         "process_document",
         job,
     )
+    await r.stop()
+
+def lambda_handler(event, _context=None):
+    job = json.loads(event["body"])
+
+    # asyncio.run() spins up an event loop for this invocation, constructs
+    # Resonate inside it, fires the RPC, then tears down cleanly.
+    asyncio.run(_dispatch_async(job))
 
     return {"statusCode": 202, "body": json.dumps({"status": "accepted"})}
 ```

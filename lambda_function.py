@@ -34,14 +34,10 @@ from typing import Any
 from resonate.resonate import Resonate
 
 # ---------------------------------------------------------------------------
-# Lambda-side Resonate client — created once per container cold start
+# Configuration
 # ---------------------------------------------------------------------------
-# Module-level: keeps the Resonate connection warm across invocations within
-# the same Lambda container. Configured to talk to a remote Resonate Server.
 
 RESONATE_URL = os.environ.get("RESONATE_URL", "http://localhost:8001")
-
-resonate = Resonate(url=RESONATE_URL, group="gateway")
 
 JSON_HEADERS = {"Content-Type": "application/json"}
 
@@ -57,6 +53,16 @@ def _response(status_code: int, payload: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # POST /process-document — dispatch a durable document processing job
 # ---------------------------------------------------------------------------
+
+async def _dispatch_async(job: dict[str, Any]) -> None:
+    r = Resonate(url=RESONATE_URL, group="gateway")
+    r.options(target="worker").rpc(
+        f"doc/{job['jobId']}",
+        "process_document",
+        job,
+    )
+    await r.stop()
+
 
 def _handle_process_document(event: dict[str, Any]) -> dict[str, Any]:
     body_raw = event.get("body") or "{}"
@@ -88,11 +94,7 @@ def _handle_process_document(event: dict[str, Any]) -> dict[str, Any]:
     # Non-blocking: hands the work to the Resonate Server. The worker picks
     # it up via the worker group's poll endpoint. Lambda exits without
     # waiting for the workflow to finish.
-    resonate.options(target="worker").rpc(
-        f"doc/{job_id}",
-        "process_document",
-        job,
-    )
+    asyncio.run(_dispatch_async(job))
 
     return _response(
         202,
@@ -110,11 +112,14 @@ def _handle_process_document(event: dict[str, Any]) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 async def _status_async(job_id: str) -> dict[str, Any]:
-    handle = await resonate.get(f"doc/{job_id}")
+    r = Resonate(url=RESONATE_URL, group="gateway")
+    handle = await r.get(f"doc/{job_id}")
     if not handle.done():
+        await r.stop()
         return _response(200, {"status": "processing", "jobId": job_id})
 
     result = await handle.result()
+    await r.stop()
     return _response(200, {"status": "done", "jobId": job_id, "result": result})
 
 
